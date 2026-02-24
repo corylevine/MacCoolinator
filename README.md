@@ -1,5 +1,7 @@
 # MacCoolinator
 
+![MacCoolinator in Mission Control](assets/maccoolinatordemo.png)
+
 A macOS menu bar app that displays window title overlays on top of thumbnails during Mission Control, making it easy to identify windows at a glance.
 
 Requires macOS 13 (Ventura) or later.
