@@ -7,7 +7,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowTitleService: WindowTitleService?
     private var overlayRetryCount = 0
     private var refreshTimer: Timer?
-    private var lastThumbnails: [ThumbnailInfo] = []
+    private var lastRawThumbnails: [ThumbnailInfo] = []
+    private var sleepWakeObservers: [NSObjectProtocol] = []
+    private let titleResolveQueue = DispatchQueue(label: "com.maccoolinator.titleResolve", qos: .userInitiated)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         titleOverlayManager = TitleOverlayManager()
@@ -24,18 +26,50 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         missionControlMonitor?.start()
+        registerSleepWakeHandlers()
+    }
+
+    // MARK: - Sleep / Wake
+
+    private func registerSleepWakeHandlers() {
+        let ws = NSWorkspace.shared.notificationCenter
+
+        sleepWakeObservers.append(
+            ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.handleSleep()
+            }
+        )
+
+        sleepWakeObservers.append(
+            ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.handleWake()
+            }
+        )
+    }
+
+    private func handleSleep() {
+        NSLog("MacCoolinator: System going to sleep – cleaning up")
+        stopRefreshTimer()
+        titleOverlayManager?.removeAll()
+        lastRawThumbnails = []
+        missionControlMonitor?.prepareForSleep()
+    }
+
+    private func handleWake() {
+        NSLog("MacCoolinator: System woke – restarting monitor polling")
+        missionControlMonitor?.restartPolling()
     }
 
     private func handleMissionControlStateChange(_ isActive: Bool) {
         if isActive {
             overlayRetryCount = 0
-            lastThumbnails = []
+            lastRawThumbnails = []
             showOverlaysWhenReady()
             startRefreshTimer()
         } else {
             stopRefreshTimer()
             titleOverlayManager?.removeAll()
-            lastThumbnails = []
+            lastRawThumbnails = []
         }
     }
 
@@ -46,18 +80,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let windowInfos = windowTitleService.getThumbnailInfo()
+        let raw = windowTitleService.getRawThumbnailInfo()
 
-        if windowInfos.isEmpty && overlayRetryCount < 6 {
+        if raw.isEmpty && overlayRetryCount < 10 {
             overlayRetryCount += 1
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
                 self?.showOverlaysWhenReady()
             }
             return
         }
 
-        lastThumbnails = windowInfos
-        titleOverlayManager.update(with: windowInfos)
+        guard monitor.isActive else { return }
+
+        lastRawThumbnails = raw
+        titleOverlayManager.update(with: raw)
+        resolveAndUpdateTitles(for: raw)
+    }
+
+    /// Resolve truncated titles on a background thread, then update overlays.
+    private func resolveAndUpdateTitles(for raw: [ThumbnailInfo]) {
+        guard let windowTitleService else { return }
+        titleResolveQueue.async { [weak self] in
+            let resolved = windowTitleService.resolveTitles(for: raw)
+            DispatchQueue.main.async {
+                guard let self,
+                      let monitor = self.missionControlMonitor, monitor.isActive else { return }
+                self.titleOverlayManager?.update(with: resolved)
+            }
+        }
     }
 
     // MARK: - Continuous refresh while MC is active
@@ -79,12 +129,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let windowTitleService, let titleOverlayManager else { return }
         guard let monitor = missionControlMonitor, monitor.isActive else { return }
 
-        let current = windowTitleService.getThumbnailInfo()
+        let current = windowTitleService.getRawThumbnailInfo()
         guard !current.isEmpty else { return }
 
-        if thumbnailsChanged(old: lastThumbnails, new: current) {
-            lastThumbnails = current
+        if thumbnailsChanged(old: lastRawThumbnails, new: current) {
+            lastRawThumbnails = current
             titleOverlayManager.update(with: current)
+            resolveAndUpdateTitles(for: current)
         }
     }
 

@@ -54,6 +54,25 @@ final class MissionControlMonitor {
         }
     }
 
+    /// Reset internal state before sleep so wake starts clean.
+    func prepareForSleep() {
+        isActive = false
+        lastDismissTime = 0
+        timer?.invalidate()
+        timer = nil
+    }
+
+    /// Reinitializes the polling timer and runs an immediate poll.
+    /// Call after system wake to guarantee the timer is alive.
+    func restartPolling() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            self?.poll()
+        }
+        RunLoop.main.add(timer!, forMode: .common)
+        poll()
+    }
+
     private func handlePossibleDismiss() {
         guard isActive else { return }
         isActive = false

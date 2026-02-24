@@ -9,7 +9,8 @@ struct ThumbnailInfo {
 
 final class WindowTitleService {
 
-    func getThumbnailInfo() -> [ThumbnailInfo] {
+    /// Fast path: traverse only the Dock's AX tree. No cross-app queries.
+    func getRawThumbnailInfo() -> [ThumbnailInfo] {
         guard let dockPID = NSRunningApplication
             .runningApplications(withBundleIdentifier: "com.apple.dock")
             .first?.processIdentifier else {
@@ -22,17 +23,29 @@ final class WindowTitleService {
         collectThumbnails(from: dockApp, into: &results, depth: 0)
 
         if results.isEmpty {
-            NSLog("MacCoolinator: No thumbnails found via AX tree. Trying alternate strategy...")
             collectThumbnailsAlternate(from: dockApp, into: &results, depth: 0)
         }
 
-        // The Dock often truncates titles with "…". Resolve them against
-        // the actual full window titles from each application's AX tree.
+        return results
+    }
+
+    /// Resolve truncated Dock titles ("…") against full window titles from
+    /// every running application. Expensive — call from a background thread.
+    func resolveTitles(for thumbnails: [ThumbnailInfo]) -> [ThumbnailInfo] {
+        let hasTruncated = thumbnails.contains {
+            $0.title.hasSuffix("\u{2026}") || $0.title.hasSuffix("...")
+        }
+        guard hasTruncated else { return thumbnails }
+
         let fullTitles = collectAllWindowTitles()
-        results = results.map { info in
+        return thumbnails.map { info in
             let resolved = resolveFullTitle(dockTitle: info.title, fullTitles: fullTitles)
             return ThumbnailInfo(title: resolved, position: info.position, size: info.size)
         }
+    }
+
+    func getThumbnailInfo() -> [ThumbnailInfo] {
+        let results = resolveTitles(for: getRawThumbnailInfo())
 
         NSLog("MacCoolinator: Found %d thumbnail(s)", results.count)
         for info in results {
